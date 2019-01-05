@@ -32,7 +32,7 @@ type KubeLock interface {
 
 // NewKubeLock creates a new KubeLock.
 // The lock will not be aquired.
-func NewKubeLock(annotationKey, ownerID string, ttl time.Duration, metaGet MetaGetter, metaUpdate MetaUpdater) (KubeLock, error) {
+func NewKubeLock(annotationKey, ownerID string, ttl time.Duration, metaCreate MetaCreator, metaExists MetaExists, metaGet MetaGetter, metaUpdate MetaUpdater) (KubeLock, error) {
 	if annotationKey == "" {
 		annotationKey = defaultAnnotationKey
 	}
@@ -46,6 +46,12 @@ func NewKubeLock(annotationKey, ownerID string, ttl time.Duration, metaGet MetaG
 	if ttl == 0 {
 		ttl = defaultTTL
 	}
+	if metaCreate == nil {
+		return nil, maskAny(fmt.Errorf("metaCreate cannot be nil"))
+	}
+	if metaExists == nil {
+		return nil, maskAny(fmt.Errorf("metaExists cannot be nil"))
+	}
 	if metaGet == nil {
 		return nil, maskAny(fmt.Errorf("metaGet cannot be nil"))
 	}
@@ -56,6 +62,8 @@ func NewKubeLock(annotationKey, ownerID string, ttl time.Duration, metaGet MetaG
 		annotationKey: annotationKey,
 		ownerID:       ownerID,
 		ttl:           ttl,
+		createMeta:    metaCreate,
+		existsMeta:    metaExists,
 		getMeta:       metaGet,
 		updateMeta:    metaUpdate,
 	}, nil
@@ -70,6 +78,8 @@ type kubeLock struct {
 	annotationKey string
 	ownerID       string
 	ttl           time.Duration
+	createMeta    MetaCreator
+	existsMeta    MetaExists
 	getMeta       MetaGetter
 	updateMeta    MetaUpdater
 }
@@ -78,14 +88,22 @@ type LockData struct {
 	Owner     string    `json:"owner"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
-
-type MetaGetter func() (annotations map[string]string, resourceVersion string, extra interface{}, err error)
-type MetaUpdater func(annotations map[string]string, resourceVersion string, extra interface{}) error
+type MetaCreator func() (item interface{}, err error)
+type MetaExists func() bool
+type MetaGetter func() (annotations map[string]string, resourceVersion string, item interface{}, err error)
+type MetaUpdater func(annotations map[string]string, resourceVersion string, item interface{}) error
 
 // Acquire tries to acquire the lock.
 // If the lock is already held by us, the lock will be updated.
 // If successfull it returns nil, otherwise it returns an error.
 func (l *kubeLock) Acquire() error {
+	//Verify the Resource Exists
+	if l.existsMeta() == false {
+		_, err :=l.createMeta()
+		if err != nil {
+			return maskAny(err)
+		}
+	}
 	// Get current state
 	ann, rv, extra, err := l.getMeta()
 	if err != nil {
@@ -129,6 +147,10 @@ func (l *kubeLock) Acquire() error {
 // If the lock is already held by us, the lock will be released.
 // If successfull it returns nil, otherwise it returns an error.
 func (l *kubeLock) Release() error {
+	//Verify the Resource Exists
+	if l.existsMeta() == false {
+		return nil
+	}
 	// Get current state
 	ann, rv, extra, err := l.getMeta()
 	if err != nil {
